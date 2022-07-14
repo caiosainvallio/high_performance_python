@@ -1,0 +1,20 @@
+
+  _     ._   __/__   _ _  _  _ _/_   Recorded: 09:58:52  Samples:  8241
+ /_//_/// /_\ / //_// / //_'/ //     Duration: 8.299     CPU time: 8.296
+/   _/                      v4.2.0
+
+Program: julia1_nopil.py
+
+8.299 <module>  <string>:1
+   [4 frames hidden]  <string>, runpy
+      8.299 _run_code  runpy.py:64
+      └─ 8.299 <module>  julia1_nopil.py:1
+         └─ 8.273 calc_pure_python  julia1_nopil.py:23
+            ├─ 7.823 calculate_z_serial_purepython  julia1_nopil.py:9
+            │  ├─ 5.622 [self]  
+            │  └─ 2.201 abs  <built-in>:0
+            │        [2 frames hidden]  <built-in>
+            ├─ 0.351 [self]  
+            └─ 0.090 list.append  <built-in>:0
+                  [2 frames hidden]  <built-in>
+

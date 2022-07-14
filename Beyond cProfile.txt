@@ -1,0 +1,10 @@
+cProfile priblems:
+
+#1 High overhead and distorted results
+#2 Too much information
+#3 Offline measure of performance
+#4 Measures slowness on function level
+
+solve 1 and 2 -> pyinstrument
+python -m pyinstrument <file>.py 
+python -m pyinstrument -o test julia1_nopil.py
