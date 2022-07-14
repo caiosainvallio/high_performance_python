@@ -1,0 +1,414 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="474" onload="init(evt)" viewBox="0 0 1200 474" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:"Verdana"; font-size:12px; fill:rgb(0,0,0); }
+#title { text-anchor:middle; font-size:17px; }
+#search { opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = true;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+          svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            var el = frames.children;
+            for(var i = 0; i < el.length; i++) {
+                update_text(el[i]);
+            }
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad - 100;
+            matchedtxt.attributes.x.value = svgWidth - xpad - 100;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (/^ *\$/.test(txt) || t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                update_text(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                update_text(e);
+            }
+        }
+    }
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+        update_text(el[i]);
+    }
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="474" fill="url(#background)"/><text id="title" x="50.0000%" y="24.00">py-spy record -o profileps.svg --pid 71414</text><text id="details" x="10" y="40.00"> </text><text id="unzoom" class="hide" x="10" y="24.00">Reset Zoom</text><text id="search" x="1090" y="24.00">Search</text><text id="matched" x="1090" y="463.00"> </text><svg id="frames" x="10" width="1180" total_samples="4050"><g><title>trace (memory_profiler.py:672) (6 samples, 0.15%)</title><rect x="0.0000%" y="228" width="0.1481%" height="15" fill="rgb(227,0,7)" fg:x="0" fg:w="6"/><text x="0.2500%" y="238.50"></text></g><g><title>_get_memory (memory_profiler.py:219) (5 samples, 0.12%)</title><rect x="0.0247%" y="244" width="0.1235%" height="15" fill="rgb(217,0,24)" fg:x="1" fg:w="5"/><text x="0.2747%" y="254.50"></text></g><g><title>calculate_z_serial_purepython (julia1_memoryprofiler.py:13) (7 samples, 0.17%)</title><rect x="0.0000%" y="196" width="0.1728%" height="15" fill="rgb(221,193,54)" fg:x="0" fg:w="7"/><text x="0.2500%" y="206.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:797) (7 samples, 0.17%)</title><rect x="0.0000%" y="212" width="0.1728%" height="15" fill="rgb(248,212,6)" fg:x="0" fg:w="7"/><text x="0.2500%" y="222.50"></text></g><g><title>trace (memory_profiler.py:672) (9 samples, 0.22%)</title><rect x="0.1728%" y="228" width="0.2222%" height="15" fill="rgb(208,68,35)" fg:x="7" fg:w="9"/><text x="0.4228%" y="238.50"></text></g><g><title>_get_memory (memory_profiler.py:219) (8 samples, 0.20%)</title><rect x="0.1975%" y="244" width="0.1975%" height="15" fill="rgb(232,128,0)" fg:x="8" fg:w="8"/><text x="0.4475%" y="254.50"></text></g><g><title>ps_util_tool (memory_profiler.py:138) (5 samples, 0.12%)</title><rect x="0.2716%" y="260" width="0.1235%" height="15" fill="rgb(207,160,47)" fg:x="11" fg:w="5"/><text x="0.5216%" y="270.50"></text></g><g><title>wrapper (psutil/_common.py:445) (5 samples, 0.12%)</title><rect x="0.2716%" y="276" width="0.1235%" height="15" fill="rgb(228,23,34)" fg:x="11" fg:w="5"/><text x="0.5216%" y="286.50"></text></g><g><title>memory_info (psutil/__init__.py:1058) (5 samples, 0.12%)</title><rect x="0.2716%" y="292" width="0.1235%" height="15" fill="rgb(218,30,26)" fg:x="11" fg:w="5"/><text x="0.5216%" y="302.50"></text></g><g><title>wrapper (psutil/_pslinux.py:1642) (5 samples, 0.12%)</title><rect x="0.2716%" y="308" width="0.1235%" height="15" fill="rgb(220,122,19)" fg:x="11" fg:w="5"/><text x="0.5216%" y="318.50"></text></g><g><title>calculate_z_serial_purepython (julia1_memoryprofiler.py:14) (10 samples, 0.25%)</title><rect x="0.1728%" y="196" width="0.2469%" height="15" fill="rgb(250,228,42)" fg:x="7" fg:w="10"/><text x="0.4228%" y="206.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:797) (10 samples, 0.25%)</title><rect x="0.1728%" y="212" width="0.2469%" height="15" fill="rgb(240,193,28)" fg:x="7" fg:w="10"/><text x="0.4228%" y="222.50"></text></g><g><title>trace (memory_profiler.py:672) (9 samples, 0.22%)</title><rect x="0.4198%" y="228" width="0.2222%" height="15" fill="rgb(216,20,37)" fg:x="17" fg:w="9"/><text x="0.6698%" y="238.50"></text></g><g><title>_get_memory (memory_profiler.py:219) (8 samples, 0.20%)</title><rect x="0.4444%" y="244" width="0.1975%" height="15" fill="rgb(206,188,39)" fg:x="18" fg:w="8"/><text x="0.6944%" y="254.50"></text></g><g><title>calculate_z_serial_purepython (julia1_memoryprofiler.py:15) (10 samples, 0.25%)</title><rect x="0.4198%" y="196" width="0.2469%" height="15" fill="rgb(217,207,13)" fg:x="17" fg:w="10"/><text x="0.6698%" y="206.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:797) (10 samples, 0.25%)</title><rect x="0.4198%" y="212" width="0.2469%" height="15" fill="rgb(231,73,38)" fg:x="17" fg:w="10"/><text x="0.6698%" y="222.50"></text></g><g><title>calculate_z_serial_purepython (julia1_memoryprofiler.py:16) (11 samples, 0.27%)</title><rect x="0.6667%" y="196" width="0.2716%" height="15" fill="rgb(225,20,46)" fg:x="27" fg:w="11"/><text x="0.9167%" y="206.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:797) (11 samples, 0.27%)</title><rect x="0.6667%" y="212" width="0.2716%" height="15" fill="rgb(210,31,41)" fg:x="27" fg:w="11"/><text x="0.9167%" y="222.50"></text></g><g><title>trace (memory_profiler.py:672) (11 samples, 0.27%)</title><rect x="0.6667%" y="228" width="0.2716%" height="15" fill="rgb(221,200,47)" fg:x="27" fg:w="11"/><text x="0.9167%" y="238.50"></text></g><g><title>_get_memory (memory_profiler.py:219) (10 samples, 0.25%)</title><rect x="0.6914%" y="244" width="0.2469%" height="15" fill="rgb(226,26,5)" fg:x="28" fg:w="10"/><text x="0.9414%" y="254.50"></text></g><g><title>ps_util_tool (memory_profiler.py:138) (6 samples, 0.15%)</title><rect x="0.7901%" y="260" width="0.1481%" height="15" fill="rgb(249,33,26)" fg:x="32" fg:w="6"/><text x="1.0401%" y="270.50"></text></g><g><title>wrapper (psutil/_common.py:445) (6 samples, 0.15%)</title><rect x="0.7901%" y="276" width="0.1481%" height="15" fill="rgb(235,183,28)" fg:x="32" fg:w="6"/><text x="1.0401%" y="286.50"></text></g><g><title>memory_info (psutil/__init__.py:1058) (6 samples, 0.15%)</title><rect x="0.7901%" y="292" width="0.1481%" height="15" fill="rgb(221,5,38)" fg:x="32" fg:w="6"/><text x="1.0401%" y="302.50"></text></g><g><title>wrapper (psutil/_pslinux.py:1642) (6 samples, 0.15%)</title><rect x="0.7901%" y="308" width="0.1481%" height="15" fill="rgb(247,18,42)" fg:x="32" fg:w="6"/><text x="1.0401%" y="318.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:791) (6 samples, 0.15%)</title><rect x="1.9012%" y="212" width="0.1481%" height="15" fill="rgb(241,131,45)" fg:x="77" fg:w="6"/><text x="2.1512%" y="222.50"></text></g><g><title>_get_memory (memory_profiler.py:118) (21 samples, 0.52%)</title><rect x="2.5432%" y="244" width="0.5185%" height="15" fill="rgb(249,31,29)" fg:x="103" fg:w="21"/><text x="2.7932%" y="254.50"></text></g><g><title>_get_memory (memory_profiler.py:214) (5 samples, 0.12%)</title><rect x="3.2099%" y="244" width="0.1235%" height="15" fill="rgb(225,111,53)" fg:x="130" fg:w="5"/><text x="3.4599%" y="254.50"></text></g><g><title>_init (psutil/__init__.py:350) (21 samples, 0.52%)</title><rect x="4.5926%" y="292" width="0.5185%" height="15" fill="rgb(238,160,17)" fg:x="186" fg:w="21"/><text x="4.8426%" y="302.50"></text></g><g><title>RLock (threading.py:93) (9 samples, 0.22%)</title><rect x="4.8889%" y="308" width="0.2222%" height="15" fill="rgb(214,148,48)" fg:x="198" fg:w="9"/><text x="5.1389%" y="318.50"></text></g><g><title>__init__ (psutil/_pslinux.py:1662) (5 samples, 0.12%)</title><rect x="5.4074%" y="308" width="0.1235%" height="15" fill="rgb(232,36,49)" fg:x="219" fg:w="5"/><text x="5.6574%" y="318.50"></text></g><g><title>_init (psutil/__init__.py:355) (35 samples, 0.86%)</title><rect x="5.1358%" y="292" width="0.8642%" height="15" fill="rgb(209,103,24)" fg:x="208" fg:w="35"/><text x="5.3858%" y="302.50"></text></g><g><title>__init__ (psutil/_pslinux.py:1665) (17 samples, 0.42%)</title><rect x="5.5802%" y="308" width="0.4198%" height="15" fill="rgb(229,88,8)" fg:x="226" fg:w="17"/><text x="5.8302%" y="318.50"></text></g><g><title>get_procfs_path (psutil/_common.py:800) (6 samples, 0.15%)</title><rect x="5.8519%" y="324" width="0.1481%" height="15" fill="rgb(213,181,19)" fg:x="237" fg:w="6"/><text x="6.1019%" y="334.50"></text></g><g><title>wrapper (psutil/_common.py:442) (14 samples, 0.35%)</title><rect x="7.0123%" y="372" width="0.3457%" height="15" fill="rgb(254,191,54)" fg:x="284" fg:w="14"/><text x="7.2623%" y="382.50"></text></g><g><title>cat (psutil/_common.py:763) (159 samples, 3.93%)</title><rect x="8.7407%" y="420" width="3.9259%" height="15" fill="rgb(241,83,37)" fg:x="354" fg:w="159"/><text x="8.9907%" y="430.50">cat ..</text></g><g><title>open_binary (psutil/_common.py:727) (152 samples, 3.75%)</title><rect x="8.9136%" y="436" width="3.7531%" height="15" fill="rgb(233,36,39)" fg:x="361" fg:w="152"/><text x="9.1636%" y="446.50">open..</text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1684) (386 samples, 9.53%)</title><rect x="7.7531%" y="388" width="9.5309%" height="15" fill="rgb(226,3,54)" fg:x="314" fg:w="386"/><text x="8.0031%" y="398.50">_parse_stat_fi..</text></g><g><title>bcat (psutil/_common.py:775) (364 samples, 8.99%)</title><rect x="8.2963%" y="404" width="8.9877%" height="15" fill="rgb(245,192,40)" fg:x="336" fg:w="364"/><text x="8.5463%" y="414.50">bcat (psutil/..</text></g><g><title>cat (psutil/_common.py:764) (187 samples, 4.62%)</title><rect x="12.6667%" y="420" width="4.6173%" height="15" fill="rgb(238,167,29)" fg:x="513" fg:w="187"/><text x="12.9167%" y="430.50">cat (..</text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1688) (9 samples, 0.22%)</title><rect x="17.2840%" y="388" width="0.2222%" height="15" fill="rgb(232,182,51)" fg:x="700" fg:w="9"/><text x="17.5340%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1689) (14 samples, 0.35%)</title><rect x="17.5062%" y="388" width="0.3457%" height="15" fill="rgb(231,60,39)" fg:x="709" fg:w="14"/><text x="17.7562%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1690) (40 samples, 0.99%)</title><rect x="17.8519%" y="388" width="0.9877%" height="15" fill="rgb(208,69,12)" fg:x="723" fg:w="40"/><text x="18.1019%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1692) (5 samples, 0.12%)</title><rect x="18.8395%" y="388" width="0.1235%" height="15" fill="rgb(235,93,37)" fg:x="763" fg:w="5"/><text x="19.0895%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1694) (5 samples, 0.12%)</title><rect x="19.0123%" y="388" width="0.1235%" height="15" fill="rgb(213,116,39)" fg:x="770" fg:w="5"/><text x="19.2623%" y="398.50"></text></g><g><title>create_time (psutil/_pslinux.py:1852) (523 samples, 12.91%)</title><rect x="6.5185%" y="340" width="12.9136%" height="15" fill="rgb(222,207,29)" fg:x="264" fg:w="523"/><text x="6.7685%" y="350.50">create_time (psutil..</text></g><g><title>wrapper (psutil/_pslinux.py:1642) (505 samples, 12.47%)</title><rect x="6.9630%" y="356" width="12.4691%" height="15" fill="rgb(206,96,30)" fg:x="282" fg:w="505"/><text x="7.2130%" y="366.50">wrapper (psutil/_ps..</text></g><g><title>wrapper (psutil/_common.py:445) (489 samples, 12.07%)</title><rect x="7.3580%" y="372" width="12.0741%" height="15" fill="rgb(218,138,4)" fg:x="298" fg:w="489"/><text x="7.6080%" y="382.50">wrapper (psutil/_c..</text></g><g><title>create_time (psutil/__init__.py:714) (546 samples, 13.48%)</title><rect x="6.0988%" y="308" width="13.4815%" height="15" fill="rgb(250,191,14)" fg:x="247" fg:w="546"/><text x="6.3488%" y="318.50">create_time (psutil/..</text></g><g><title>wrapper (psutil/_pslinux.py:1642) (538 samples, 13.28%)</title><rect x="6.2963%" y="324" width="13.2840%" height="15" fill="rgb(239,60,40)" fg:x="255" fg:w="538"/><text x="6.5463%" y="334.50">wrapper (psutil/_psl..</text></g><g><title>_init (psutil/__init__.py:361) (549 samples, 13.56%)</title><rect x="6.0494%" y="292" width="13.5556%" height="15" fill="rgb(206,27,48)" fg:x="245" fg:w="549"/><text x="6.2994%" y="302.50">_init (psutil/__init..</text></g><g><title>ps_util_tool (memory_profiler.py:132) (654 samples, 16.15%)</title><rect x="3.7531%" y="260" width="16.1481%" height="15" fill="rgb(225,35,8)" fg:x="152" fg:w="654"/><text x="4.0031%" y="270.50">ps_util_tool (memory_prof..</text></g><g><title>__init__ (psutil/__init__.py:332) (629 samples, 15.53%)</title><rect x="4.3704%" y="276" width="15.5309%" height="15" fill="rgb(250,213,24)" fg:x="177" fg:w="629"/><text x="4.6204%" y="286.50">__init__ (psutil/__init_..</text></g><g><title>_init (psutil/__init__.py:380) (12 samples, 0.30%)</title><rect x="19.6049%" y="292" width="0.2963%" height="15" fill="rgb(247,123,22)" fg:x="794" fg:w="12"/><text x="19.8549%" y="302.50"></text></g><g><title>pid (psutil/__init__.py:426) (6 samples, 0.15%)</title><rect x="19.7531%" y="308" width="0.1481%" height="15" fill="rgb(231,138,38)" fg:x="800" fg:w="6"/><text x="20.0031%" y="318.50"></text></g><g><title>ps_util_tool (memory_profiler.py:136) (9 samples, 0.22%)</title><rect x="19.9259%" y="260" width="0.2222%" height="15" fill="rgb(231,145,46)" fg:x="807" fg:w="9"/><text x="20.1759%" y="270.50"></text></g><g><title>wrapper (psutil/_common.py:442) (22 samples, 0.54%)</title><rect x="20.5926%" y="276" width="0.5432%" height="15" fill="rgb(251,118,11)" fg:x="834" fg:w="22"/><text x="20.8426%" y="286.50"></text></g><g><title>memory_info (psutil/_pslinux.py:1874) (157 samples, 3.88%)</title><rect x="21.8025%" y="324" width="3.8765%" height="15" fill="rgb(217,147,25)" fg:x="883" fg:w="157"/><text x="22.0525%" y="334.50">memo..</text></g><g><title>open_binary (psutil/_common.py:727) (146 samples, 3.60%)</title><rect x="22.0741%" y="340" width="3.6049%" height="15" fill="rgb(247,81,37)" fg:x="894" fg:w="146"/><text x="22.3241%" y="350.50">open..</text></g><g><title>memory_info (psutil/_pslinux.py:1875) (64 samples, 1.58%)</title><rect x="25.6790%" y="324" width="1.5802%" height="15" fill="rgb(209,12,38)" fg:x="1040" fg:w="64"/><text x="25.9290%" y="334.50"></text></g><g><title>memory_info (psutil/_pslinux.py:1876) (133 samples, 3.28%)</title><rect x="27.2593%" y="324" width="3.2840%" height="15" fill="rgb(227,1,9)" fg:x="1104" fg:w="133"/><text x="27.5093%" y="334.50">mem..</text></g><g><title>&lt;listcomp&gt; (psutil/_pslinux.py:1876) (40 samples, 0.99%)</title><rect x="29.5556%" y="340" width="0.9877%" height="15" fill="rgb(248,47,43)" fg:x="1197" fg:w="40"/><text x="29.8056%" y="350.50"></text></g><g><title>ps_util_tool (memory_profiler.py:138) (440 samples, 10.86%)</title><rect x="20.1481%" y="260" width="10.8642%" height="15" fill="rgb(221,10,30)" fg:x="816" fg:w="440"/><text x="20.3981%" y="270.50">ps_util_tool (me..</text></g><g><title>wrapper (psutil/_common.py:445) (399 samples, 9.85%)</title><rect x="21.1605%" y="276" width="9.8519%" height="15" fill="rgb(210,229,1)" fg:x="857" fg:w="399"/><text x="21.4105%" y="286.50">wrapper (psuti..</text></g><g><title>memory_info (psutil/__init__.py:1058) (389 samples, 9.60%)</title><rect x="21.4074%" y="292" width="9.6049%" height="15" fill="rgb(222,148,37)" fg:x="867" fg:w="389"/><text x="21.6574%" y="302.50">memory_info (p..</text></g><g><title>wrapper (psutil/_pslinux.py:1642) (382 samples, 9.43%)</title><rect x="21.5802%" y="308" width="9.4321%" height="15" fill="rgb(234,67,33)" fg:x="874" fg:w="382"/><text x="21.8302%" y="318.50">wrapper (psut..</text></g><g><title>memory_info (psutil/_pslinux.py:1877) (19 samples, 0.47%)</title><rect x="30.5432%" y="324" width="0.4691%" height="15" fill="rgb(247,98,35)" fg:x="1237" fg:w="19"/><text x="30.7932%" y="334.50"></text></g><g><title>&lt;lambda&gt; (&lt;string&gt;:1) (10 samples, 0.25%)</title><rect x="30.7654%" y="340" width="0.2469%" height="15" fill="rgb(247,138,52)" fg:x="1246" fg:w="10"/><text x="31.0154%" y="350.50"></text></g><g><title>trace (memory_profiler.py:672) (1,169 samples, 28.86%)</title><rect x="2.1975%" y="228" width="28.8642%" height="15" fill="rgb(213,79,30)" fg:x="89" fg:w="1169"/><text x="2.4475%" y="238.50">trace (memory_profiler.py:672)</text></g><g><title>_get_memory (memory_profiler.py:219) (1,119 samples, 27.63%)</title><rect x="3.4321%" y="244" width="27.6296%" height="15" fill="rgb(246,177,23)" fg:x="139" fg:w="1119"/><text x="3.6821%" y="254.50">_get_memory (memory_profiler.py:219)</text></g><g><title>trace (memory_profiler.py:674) (11 samples, 0.27%)</title><rect x="31.1358%" y="228" width="0.2716%" height="15" fill="rgb(230,62,27)" fg:x="1261" fg:w="11"/><text x="31.3858%" y="238.50"></text></g><g><title>trace (memory_profiler.py:678) (6 samples, 0.15%)</title><rect x="31.4815%" y="228" width="0.1481%" height="15" fill="rgb(216,154,8)" fg:x="1275" fg:w="6"/><text x="31.7315%" y="238.50"></text></g><g><title>trace (memory_profiler.py:680) (15 samples, 0.37%)</title><rect x="31.6543%" y="228" width="0.3704%" height="15" fill="rgb(244,35,45)" fg:x="1282" fg:w="15"/><text x="31.9043%" y="238.50"></text></g><g><title>trace (memory_profiler.py:681) (5 samples, 0.12%)</title><rect x="32.0247%" y="228" width="0.1235%" height="15" fill="rgb(251,115,12)" fg:x="1297" fg:w="5"/><text x="32.2747%" y="238.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:797) (1,229 samples, 30.35%)</title><rect x="2.1481%" y="212" width="30.3457%" height="15" fill="rgb(240,54,50)" fg:x="87" fg:w="1229"/><text x="2.3981%" y="222.50">trace_memory_usage (memory_profiler.py:797)</text></g><g><title>trace (memory_profiler.py:683) (12 samples, 0.30%)</title><rect x="32.1975%" y="228" width="0.2963%" height="15" fill="rgb(233,84,52)" fg:x="1304" fg:w="12"/><text x="32.4475%" y="238.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:799) (5 samples, 0.12%)</title><rect x="32.4938%" y="212" width="0.1235%" height="15" fill="rgb(207,117,47)" fg:x="1316" fg:w="5"/><text x="32.7438%" y="222.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:800) (7 samples, 0.17%)</title><rect x="32.6173%" y="212" width="0.1728%" height="15" fill="rgb(249,43,39)" fg:x="1321" fg:w="7"/><text x="32.8673%" y="222.50"></text></g><g><title>calculate_z_serial_purepython (julia1_memoryprofiler.py:17) (1,299 samples, 32.07%)</title><rect x="0.9383%" y="196" width="32.0741%" height="15" fill="rgb(209,38,44)" fg:x="38" fg:w="1299"/><text x="1.1883%" y="206.50">calculate_z_serial_purepython (julia1_memoryprofiler..</text></g><g><title>trace_memory_usage (memory_profiler.py:809) (5 samples, 0.12%)</title><rect x="32.8889%" y="212" width="0.1235%" height="15" fill="rgb(236,212,23)" fg:x="1332" fg:w="5"/><text x="33.1389%" y="222.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:791) (9 samples, 0.22%)</title><rect x="33.5802%" y="212" width="0.2222%" height="15" fill="rgb(242,79,21)" fg:x="1360" fg:w="9"/><text x="33.8302%" y="222.50"></text></g><g><title>_get_memory (memory_profiler.py:118) (24 samples, 0.59%)</title><rect x="34.7654%" y="244" width="0.5926%" height="15" fill="rgb(211,96,35)" fg:x="1408" fg:w="24"/><text x="35.0154%" y="254.50"></text></g><g><title>_get_memory (memory_profiler.py:214) (7 samples, 0.17%)</title><rect x="35.5309%" y="244" width="0.1728%" height="15" fill="rgb(253,215,40)" fg:x="1439" fg:w="7"/><text x="35.7809%" y="254.50"></text></g><g><title>_get_memory (memory_profiler.py:216) (5 samples, 0.12%)</title><rect x="35.7037%" y="244" width="0.1235%" height="15" fill="rgb(211,81,21)" fg:x="1446" fg:w="5"/><text x="35.9537%" y="254.50"></text></g><g><title>_init (psutil/__init__.py:350) (10 samples, 0.25%)</title><rect x="36.6173%" y="292" width="0.2469%" height="15" fill="rgb(208,190,38)" fg:x="1483" fg:w="10"/><text x="36.8673%" y="302.50"></text></g><g><title>RLock (threading.py:93) (6 samples, 0.15%)</title><rect x="36.7160%" y="308" width="0.1481%" height="15" fill="rgb(235,213,38)" fg:x="1487" fg:w="6"/><text x="36.9660%" y="318.50"></text></g><g><title>_init (psutil/__init__.py:355) (31 samples, 0.77%)</title><rect x="36.9136%" y="292" width="0.7654%" height="15" fill="rgb(237,122,38)" fg:x="1495" fg:w="31"/><text x="37.1636%" y="302.50"></text></g><g><title>__init__ (psutil/_pslinux.py:1665) (13 samples, 0.32%)</title><rect x="37.3580%" y="308" width="0.3210%" height="15" fill="rgb(244,218,35)" fg:x="1513" fg:w="13"/><text x="37.6080%" y="318.50"></text></g><g><title>get_procfs_path (psutil/_common.py:800) (7 samples, 0.17%)</title><rect x="37.5062%" y="324" width="0.1728%" height="15" fill="rgb(240,68,47)" fg:x="1519" fg:w="7"/><text x="37.7562%" y="334.50"></text></g><g><title>wrapper (psutil/_common.py:442) (16 samples, 0.40%)</title><rect x="38.8395%" y="372" width="0.3951%" height="15" fill="rgb(210,16,53)" fg:x="1573" fg:w="16"/><text x="39.0895%" y="382.50"></text></g><g><title>cat (psutil/_common.py:763) (191 samples, 4.72%)</title><rect x="39.9753%" y="420" width="4.7160%" height="15" fill="rgb(235,124,12)" fg:x="1619" fg:w="191"/><text x="40.2253%" y="430.50">cat (..</text></g><g><title>open_binary (psutil/_common.py:727) (178 samples, 4.40%)</title><rect x="40.2963%" y="436" width="4.3951%" height="15" fill="rgb(224,169,11)" fg:x="1632" fg:w="178"/><text x="40.5463%" y="446.50">open_..</text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1684) (417 samples, 10.30%)</title><rect x="39.4321%" y="388" width="10.2963%" height="15" fill="rgb(250,166,2)" fg:x="1597" fg:w="417"/><text x="39.6821%" y="398.50">_parse_stat_fil..</text></g><g><title>bcat (psutil/_common.py:775) (406 samples, 10.02%)</title><rect x="39.7037%" y="404" width="10.0247%" height="15" fill="rgb(242,216,29)" fg:x="1608" fg:w="406"/><text x="39.9537%" y="414.50">bcat (psutil/_..</text></g><g><title>cat (psutil/_common.py:764) (204 samples, 5.04%)</title><rect x="44.6914%" y="420" width="5.0370%" height="15" fill="rgb(230,116,27)" fg:x="1810" fg:w="204"/><text x="44.9414%" y="430.50">cat (p..</text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1688) (15 samples, 0.37%)</title><rect x="49.7284%" y="388" width="0.3704%" height="15" fill="rgb(228,99,48)" fg:x="2014" fg:w="15"/><text x="49.9784%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1689) (22 samples, 0.54%)</title><rect x="50.0988%" y="388" width="0.5432%" height="15" fill="rgb(253,11,6)" fg:x="2029" fg:w="22"/><text x="50.3488%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1690) (30 samples, 0.74%)</title><rect x="50.6420%" y="388" width="0.7407%" height="15" fill="rgb(247,143,39)" fg:x="2051" fg:w="30"/><text x="50.8920%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1701) (5 samples, 0.12%)</title><rect x="51.8765%" y="388" width="0.1235%" height="15" fill="rgb(236,97,10)" fg:x="2101" fg:w="5"/><text x="52.1265%" y="398.50"></text></g><g><title>create_time (psutil/_pslinux.py:1852) (564 samples, 13.93%)</title><rect x="38.2222%" y="340" width="13.9259%" height="15" fill="rgb(233,208,19)" fg:x="1548" fg:w="564"/><text x="38.4722%" y="350.50">create_time (psutil/_..</text></g><g><title>wrapper (psutil/_pslinux.py:1642) (544 samples, 13.43%)</title><rect x="38.7160%" y="356" width="13.4321%" height="15" fill="rgb(216,164,2)" fg:x="1568" fg:w="544"/><text x="38.9660%" y="366.50">wrapper (psutil/_psl..</text></g><g><title>wrapper (psutil/_common.py:445) (522 samples, 12.89%)</title><rect x="39.2593%" y="372" width="12.8889%" height="15" fill="rgb(220,129,5)" fg:x="1590" fg:w="522"/><text x="39.5093%" y="382.50">wrapper (psutil/_co..</text></g><g><title>_init (psutil/__init__.py:361) (588 samples, 14.52%)</title><rect x="37.8272%" y="292" width="14.5185%" height="15" fill="rgb(242,17,10)" fg:x="1532" fg:w="588"/><text x="38.0772%" y="302.50">_init (psutil/__init__..</text></g><g><title>create_time (psutil/__init__.py:714) (582 samples, 14.37%)</title><rect x="37.9753%" y="308" width="14.3704%" height="15" fill="rgb(242,107,0)" fg:x="1538" fg:w="582"/><text x="38.2253%" y="318.50">create_time (psutil/__..</text></g><g><title>wrapper (psutil/_pslinux.py:1642) (578 samples, 14.27%)</title><rect x="38.0741%" y="324" width="14.2716%" height="15" fill="rgb(251,28,31)" fg:x="1542" fg:w="578"/><text x="38.3241%" y="334.50">wrapper (psutil/_pslin..</text></g><g><title>ps_util_tool (memory_profiler.py:132) (671 samples, 16.57%)</title><rect x="36.1481%" y="260" width="16.5679%" height="15" fill="rgb(233,223,10)" fg:x="1464" fg:w="671"/><text x="36.3981%" y="270.50">ps_util_tool (memory_profi..</text></g><g><title>__init__ (psutil/__init__.py:332) (660 samples, 16.30%)</title><rect x="36.4198%" y="276" width="16.2963%" height="15" fill="rgb(215,21,27)" fg:x="1475" fg:w="660"/><text x="36.6698%" y="286.50">__init__ (psutil/__init__..</text></g><g><title>_init (psutil/__init__.py:380) (15 samples, 0.37%)</title><rect x="52.3457%" y="292" width="0.3704%" height="15" fill="rgb(232,23,21)" fg:x="2120" fg:w="15"/><text x="52.5957%" y="302.50"></text></g><g><title>pid (psutil/__init__.py:426) (9 samples, 0.22%)</title><rect x="52.4938%" y="308" width="0.2222%" height="15" fill="rgb(244,5,23)" fg:x="2126" fg:w="9"/><text x="52.7438%" y="318.50"></text></g><g><title>ps_util_tool (memory_profiler.py:136) (8 samples, 0.20%)</title><rect x="52.7407%" y="260" width="0.1975%" height="15" fill="rgb(226,81,46)" fg:x="2136" fg:w="8"/><text x="52.9907%" y="270.50"></text></g><g><title>wrapper (psutil/_common.py:442) (20 samples, 0.49%)</title><rect x="53.4815%" y="276" width="0.4938%" height="15" fill="rgb(247,70,30)" fg:x="2166" fg:w="20"/><text x="53.7315%" y="286.50"></text></g><g><title>wrapper (psutil/_common.py:443) (5 samples, 0.12%)</title><rect x="53.9753%" y="276" width="0.1235%" height="15" fill="rgb(212,68,19)" fg:x="2186" fg:w="5"/><text x="54.2253%" y="286.50"></text></g><g><title>memory_info (psutil/_pslinux.py:1874) (191 samples, 4.72%)</title><rect x="54.8889%" y="324" width="4.7160%" height="15" fill="rgb(240,187,13)" fg:x="2223" fg:w="191"/><text x="55.1389%" y="334.50">memor..</text></g><g><title>open_binary (psutil/_common.py:727) (167 samples, 4.12%)</title><rect x="55.4815%" y="340" width="4.1235%" height="15" fill="rgb(223,113,26)" fg:x="2247" fg:w="167"/><text x="55.7315%" y="350.50">open..</text></g><g><title>memory_info (psutil/_pslinux.py:1875) (56 samples, 1.38%)</title><rect x="59.6049%" y="324" width="1.3827%" height="15" fill="rgb(206,192,2)" fg:x="2414" fg:w="56"/><text x="59.8549%" y="334.50"></text></g><g><title>memory_info (psutil/_pslinux.py:1876) (139 samples, 3.43%)</title><rect x="60.9877%" y="324" width="3.4321%" height="15" fill="rgb(241,108,4)" fg:x="2470" fg:w="139"/><text x="61.2377%" y="334.50">mem..</text></g><g><title>&lt;listcomp&gt; (psutil/_pslinux.py:1876) (36 samples, 0.89%)</title><rect x="63.5309%" y="340" width="0.8889%" height="15" fill="rgb(247,173,49)" fg:x="2573" fg:w="36"/><text x="63.7809%" y="350.50"></text></g><g><title>ps_util_tool (memory_profiler.py:138) (482 samples, 11.90%)</title><rect x="52.9383%" y="260" width="11.9012%" height="15" fill="rgb(224,114,35)" fg:x="2144" fg:w="482"/><text x="53.1883%" y="270.50">ps_util_tool (memo..</text></g><g><title>wrapper (psutil/_common.py:445) (435 samples, 10.74%)</title><rect x="54.0988%" y="276" width="10.7407%" height="15" fill="rgb(245,159,27)" fg:x="2191" fg:w="435"/><text x="54.3488%" y="286.50">wrapper (psutil/..</text></g><g><title>memory_info (psutil/__init__.py:1058) (431 samples, 10.64%)</title><rect x="54.1975%" y="292" width="10.6420%" height="15" fill="rgb(245,172,44)" fg:x="2195" fg:w="431"/><text x="54.4475%" y="302.50">memory_info (psu..</text></g><g><title>wrapper (psutil/_pslinux.py:1642) (422 samples, 10.42%)</title><rect x="54.4198%" y="308" width="10.4198%" height="15" fill="rgb(236,23,11)" fg:x="2204" fg:w="422"/><text x="54.6698%" y="318.50">wrapper (psutil..</text></g><g><title>memory_info (psutil/_pslinux.py:1877) (17 samples, 0.42%)</title><rect x="64.4198%" y="324" width="0.4198%" height="15" fill="rgb(205,117,38)" fg:x="2609" fg:w="17"/><text x="64.6698%" y="334.50"></text></g><g><title>&lt;lambda&gt; (&lt;string&gt;:1) (5 samples, 0.12%)</title><rect x="64.7160%" y="340" width="0.1235%" height="15" fill="rgb(237,72,25)" fg:x="2621" fg:w="5"/><text x="64.9660%" y="350.50"></text></g><g><title>trace (memory_profiler.py:672) (1,241 samples, 30.64%)</title><rect x="34.2222%" y="228" width="30.6420%" height="15" fill="rgb(244,70,9)" fg:x="1386" fg:w="1241"/><text x="34.4722%" y="238.50">trace (memory_profiler.py:672)</text></g><g><title>_get_memory (memory_profiler.py:219) (1,173 samples, 28.96%)</title><rect x="35.9012%" y="244" width="28.9630%" height="15" fill="rgb(217,125,39)" fg:x="1454" fg:w="1173"/><text x="36.1512%" y="254.50">_get_memory (memory_profiler.py:219)</text></g><g><title>trace (memory_profiler.py:674) (12 samples, 0.30%)</title><rect x="64.8889%" y="228" width="0.2963%" height="15" fill="rgb(235,36,10)" fg:x="2628" fg:w="12"/><text x="65.1389%" y="238.50"></text></g><g><title>trace (memory_profiler.py:678) (6 samples, 0.15%)</title><rect x="65.3827%" y="228" width="0.1481%" height="15" fill="rgb(251,123,47)" fg:x="2648" fg:w="6"/><text x="65.6327%" y="238.50"></text></g><g><title>trace (memory_profiler.py:680) (11 samples, 0.27%)</title><rect x="65.5309%" y="228" width="0.2716%" height="15" fill="rgb(221,13,13)" fg:x="2654" fg:w="11"/><text x="65.7809%" y="238.50"></text></g><g><title>trace (memory_profiler.py:681) (12 samples, 0.30%)</title><rect x="65.8025%" y="228" width="0.2963%" height="15" fill="rgb(238,131,9)" fg:x="2665" fg:w="12"/><text x="66.0525%" y="238.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:797) (1,309 samples, 32.32%)</title><rect x="33.9259%" y="212" width="32.3210%" height="15" fill="rgb(211,50,8)" fg:x="1374" fg:w="1309"/><text x="34.1759%" y="222.50">trace_memory_usage (memory_profiler.py:797)</text></g><g><title>trace_memory_usage (memory_profiler.py:799) (8 samples, 0.20%)</title><rect x="66.2469%" y="212" width="0.1975%" height="15" fill="rgb(245,182,24)" fg:x="2683" fg:w="8"/><text x="66.4969%" y="222.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:800) (11 samples, 0.27%)</title><rect x="66.4444%" y="212" width="0.2716%" height="15" fill="rgb(242,14,37)" fg:x="2691" fg:w="11"/><text x="66.6944%" y="222.50"></text></g><g><title>calculate_z_serial_purepython (julia1_memoryprofiler.py:18) (1,372 samples, 33.88%)</title><rect x="33.0123%" y="196" width="33.8765%" height="15" fill="rgb(246,228,12)" fg:x="1337" fg:w="1372"/><text x="33.2623%" y="206.50">calculate_z_serial_purepython (julia1_memoryprofiler.py..</text></g><g><title>trace_memory_usage (memory_profiler.py:809) (5 samples, 0.12%)</title><rect x="66.7654%" y="212" width="0.1235%" height="15" fill="rgb(213,55,15)" fg:x="2704" fg:w="5"/><text x="67.0154%" y="222.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:791) (12 samples, 0.30%)</title><rect x="67.5802%" y="212" width="0.2963%" height="15" fill="rgb(209,9,3)" fg:x="2737" fg:w="12"/><text x="67.8302%" y="222.50"></text></g><g><title>_get_memory (memory_profiler.py:118) (24 samples, 0.59%)</title><rect x="68.6420%" y="244" width="0.5926%" height="15" fill="rgb(230,59,30)" fg:x="2780" fg:w="24"/><text x="68.8920%" y="254.50"></text></g><g><title>_get_memory (memory_profiler.py:120) (5 samples, 0.12%)</title><rect x="69.2346%" y="244" width="0.1235%" height="15" fill="rgb(209,121,21)" fg:x="2804" fg:w="5"/><text x="69.4846%" y="254.50"></text></g><g><title>_get_memory (memory_profiler.py:214) (7 samples, 0.17%)</title><rect x="69.4815%" y="244" width="0.1728%" height="15" fill="rgb(220,109,13)" fg:x="2814" fg:w="7"/><text x="69.7315%" y="254.50"></text></g><g><title>_init (psutil/__init__.py:350) (19 samples, 0.47%)</title><rect x="70.5679%" y="292" width="0.4691%" height="15" fill="rgb(232,18,1)" fg:x="2858" fg:w="19"/><text x="70.8179%" y="302.50"></text></g><g><title>RLock (threading.py:93) (11 samples, 0.27%)</title><rect x="70.7654%" y="308" width="0.2716%" height="15" fill="rgb(215,41,42)" fg:x="2866" fg:w="11"/><text x="71.0154%" y="318.50"></text></g><g><title>_init (psutil/__init__.py:355) (23 samples, 0.57%)</title><rect x="71.0370%" y="292" width="0.5679%" height="15" fill="rgb(224,123,36)" fg:x="2877" fg:w="23"/><text x="71.2870%" y="302.50"></text></g><g><title>__init__ (psutil/_pslinux.py:1665) (14 samples, 0.35%)</title><rect x="71.2593%" y="308" width="0.3457%" height="15" fill="rgb(240,125,3)" fg:x="2886" fg:w="14"/><text x="71.5093%" y="318.50"></text></g><g><title>get_procfs_path (psutil/_common.py:800) (11 samples, 0.27%)</title><rect x="71.3333%" y="324" width="0.2716%" height="15" fill="rgb(205,98,50)" fg:x="2889" fg:w="11"/><text x="71.5833%" y="334.50"></text></g><g><title>wrapper (psutil/_common.py:442) (17 samples, 0.42%)</title><rect x="72.3457%" y="372" width="0.4198%" height="15" fill="rgb(205,185,37)" fg:x="2930" fg:w="17"/><text x="72.5957%" y="382.50"></text></g><g><title>cat (psutil/_common.py:763) (167 samples, 4.12%)</title><rect x="73.7037%" y="420" width="4.1235%" height="15" fill="rgb(238,207,15)" fg:x="2985" fg:w="167"/><text x="73.9537%" y="430.50">cat ..</text></g><g><title>open_binary (psutil/_common.py:727) (155 samples, 3.83%)</title><rect x="74.0000%" y="436" width="3.8272%" height="15" fill="rgb(213,199,42)" fg:x="2997" fg:w="155"/><text x="74.2500%" y="446.50">open..</text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1684) (390 samples, 9.63%)</title><rect x="73.1111%" y="388" width="9.6296%" height="15" fill="rgb(235,201,11)" fg:x="2961" fg:w="390"/><text x="73.3611%" y="398.50">_parse_stat_fi..</text></g><g><title>bcat (psutil/_common.py:775) (374 samples, 9.23%)</title><rect x="73.5062%" y="404" width="9.2346%" height="15" fill="rgb(207,46,11)" fg:x="2977" fg:w="374"/><text x="73.7562%" y="414.50">bcat (psutil/..</text></g><g><title>cat (psutil/_common.py:764) (199 samples, 4.91%)</title><rect x="77.8272%" y="420" width="4.9136%" height="15" fill="rgb(241,35,35)" fg:x="3152" fg:w="199"/><text x="78.0772%" y="430.50">cat (p..</text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1688) (16 samples, 0.40%)</title><rect x="82.7407%" y="388" width="0.3951%" height="15" fill="rgb(243,32,47)" fg:x="3351" fg:w="16"/><text x="82.9907%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1689) (12 samples, 0.30%)</title><rect x="83.1358%" y="388" width="0.2963%" height="15" fill="rgb(247,202,23)" fg:x="3367" fg:w="12"/><text x="83.3858%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1690) (41 samples, 1.01%)</title><rect x="83.4321%" y="388" width="1.0123%" height="15" fill="rgb(219,102,11)" fg:x="3379" fg:w="41"/><text x="83.6821%" y="398.50"></text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1700) (5 samples, 0.12%)</title><rect x="84.8889%" y="388" width="0.1235%" height="15" fill="rgb(243,110,44)" fg:x="3438" fg:w="5"/><text x="85.1389%" y="398.50"></text></g><g><title>create_time (psutil/_pslinux.py:1852) (537 samples, 13.26%)</title><rect x="71.9753%" y="340" width="13.2593%" height="15" fill="rgb(222,74,54)" fg:x="2915" fg:w="537"/><text x="72.2253%" y="350.50">create_time (psutil/..</text></g><g><title>wrapper (psutil/_pslinux.py:1642) (528 samples, 13.04%)</title><rect x="72.1975%" y="356" width="13.0370%" height="15" fill="rgb(216,99,12)" fg:x="2924" fg:w="528"/><text x="72.4475%" y="366.50">wrapper (psutil/_psl..</text></g><g><title>wrapper (psutil/_common.py:445) (505 samples, 12.47%)</title><rect x="72.7654%" y="372" width="12.4691%" height="15" fill="rgb(226,22,26)" fg:x="2947" fg:w="505"/><text x="73.0154%" y="382.50">wrapper (psutil/_co..</text></g><g><title>_parse_stat_file (psutil/_pslinux.py:1703) (6 samples, 0.15%)</title><rect x="85.0864%" y="388" width="0.1481%" height="15" fill="rgb(217,163,10)" fg:x="3446" fg:w="6"/><text x="85.3364%" y="398.50"></text></g><g><title>_init (psutil/__init__.py:361) (556 samples, 13.73%)</title><rect x="71.6790%" y="292" width="13.7284%" height="15" fill="rgb(213,25,53)" fg:x="2903" fg:w="556"/><text x="71.9290%" y="302.50">_init (psutil/__init_..</text></g><g><title>create_time (psutil/__init__.py:714) (552 samples, 13.63%)</title><rect x="71.7778%" y="308" width="13.6296%" height="15" fill="rgb(252,105,26)" fg:x="2907" fg:w="552"/><text x="72.0278%" y="318.50">create_time (psutil/_..</text></g><g><title>wrapper (psutil/_pslinux.py:1642) (549 samples, 13.56%)</title><rect x="71.8519%" y="324" width="13.5556%" height="15" fill="rgb(220,39,43)" fg:x="2910" fg:w="549"/><text x="72.1019%" y="334.50">wrapper (psutil/_psl..</text></g><g><title>ps_util_tool (memory_profiler.py:132) (632 samples, 15.60%)</title><rect x="69.9506%" y="260" width="15.6049%" height="15" fill="rgb(229,68,48)" fg:x="2833" fg:w="632"/><text x="70.2006%" y="270.50">ps_util_tool (memory_pro..</text></g><g><title>__init__ (psutil/__init__.py:332) (619 samples, 15.28%)</title><rect x="70.2716%" y="276" width="15.2840%" height="15" fill="rgb(252,8,32)" fg:x="2846" fg:w="619"/><text x="70.5216%" y="286.50">__init__ (psutil/__init..</text></g><g><title>_init (psutil/__init__.py:380) (6 samples, 0.15%)</title><rect x="85.4074%" y="292" width="0.1481%" height="15" fill="rgb(223,20,43)" fg:x="3459" fg:w="6"/><text x="85.6574%" y="302.50"></text></g><g><title>ps_util_tool (memory_profiler.py:136) (8 samples, 0.20%)</title><rect x="85.5802%" y="260" width="0.1975%" height="15" fill="rgb(229,81,49)" fg:x="3466" fg:w="8"/><text x="85.8302%" y="270.50"></text></g><g><title>wrapper (psutil/_common.py:442) (24 samples, 0.59%)</title><rect x="86.2469%" y="276" width="0.5926%" height="15" fill="rgb(236,28,36)" fg:x="3493" fg:w="24"/><text x="86.4969%" y="286.50"></text></g><g><title>memory_info (psutil/_pslinux.py:1874) (181 samples, 4.47%)</title><rect x="87.6790%" y="324" width="4.4691%" height="15" fill="rgb(249,185,26)" fg:x="3551" fg:w="181"/><text x="87.9290%" y="334.50">memor..</text></g><g><title>open_binary (psutil/_common.py:727) (166 samples, 4.10%)</title><rect x="88.0494%" y="340" width="4.0988%" height="15" fill="rgb(249,174,33)" fg:x="3566" fg:w="166"/><text x="88.2994%" y="350.50">open..</text></g><g><title>memory_info (psutil/_pslinux.py:1875) (62 samples, 1.53%)</title><rect x="92.1481%" y="324" width="1.5309%" height="15" fill="rgb(233,201,37)" fg:x="3732" fg:w="62"/><text x="92.3981%" y="334.50"></text></g><g><title>memory_info (psutil/_pslinux.py:1876) (136 samples, 3.36%)</title><rect x="93.6790%" y="324" width="3.3580%" height="15" fill="rgb(221,78,26)" fg:x="3794" fg:w="136"/><text x="93.9290%" y="334.50">mem..</text></g><g><title>&lt;listcomp&gt; (psutil/_pslinux.py:1876) (36 samples, 0.89%)</title><rect x="96.1481%" y="340" width="0.8889%" height="15" fill="rgb(250,127,30)" fg:x="3894" fg:w="36"/><text x="96.3981%" y="350.50"></text></g><g><title>ps_util_tool (memory_profiler.py:138) (480 samples, 11.85%)</title><rect x="85.7778%" y="260" width="11.8519%" height="15" fill="rgb(230,49,44)" fg:x="3474" fg:w="480"/><text x="86.0278%" y="270.50">ps_util_tool (memo..</text></g><g><title>wrapper (psutil/_common.py:445) (436 samples, 10.77%)</title><rect x="86.8642%" y="276" width="10.7654%" height="15" fill="rgb(229,67,23)" fg:x="3518" fg:w="436"/><text x="87.1142%" y="286.50">wrapper (psutil/..</text></g><g><title>memory_info (psutil/__init__.py:1058) (426 samples, 10.52%)</title><rect x="87.1111%" y="292" width="10.5185%" height="15" fill="rgb(249,83,47)" fg:x="3528" fg:w="426"/><text x="87.3611%" y="302.50">memory_info (ps..</text></g><g><title>wrapper (psutil/_pslinux.py:1642) (417 samples, 10.30%)</title><rect x="87.3333%" y="308" width="10.2963%" height="15" fill="rgb(215,43,3)" fg:x="3537" fg:w="417"/><text x="87.5833%" y="318.50">wrapper (psutil..</text></g><g><title>memory_info (psutil/_pslinux.py:1877) (24 samples, 0.59%)</title><rect x="97.0370%" y="324" width="0.5926%" height="15" fill="rgb(238,154,13)" fg:x="3930" fg:w="24"/><text x="97.2870%" y="334.50"></text></g><g><title>&lt;lambda&gt; (&lt;string&gt;:1) (18 samples, 0.44%)</title><rect x="97.1852%" y="340" width="0.4444%" height="15" fill="rgb(219,56,2)" fg:x="3936" fg:w="18"/><text x="97.4352%" y="350.50"></text></g><g><title>trace (memory_profiler.py:672) (1,190 samples, 29.38%)</title><rect x="68.2716%" y="228" width="29.3827%" height="15" fill="rgb(233,0,4)" fg:x="2765" fg:w="1190"/><text x="68.5216%" y="238.50">trace (memory_profiler.py:672)</text></g><g><title>_get_memory (memory_profiler.py:219) (1,132 samples, 27.95%)</title><rect x="69.7037%" y="244" width="27.9506%" height="15" fill="rgb(235,30,7)" fg:x="2823" fg:w="1132"/><text x="69.9537%" y="254.50">_get_memory (memory_profiler.py:219)</text></g><g><title>trace (memory_profiler.py:674) (14 samples, 0.35%)</title><rect x="97.7037%" y="228" width="0.3457%" height="15" fill="rgb(250,79,13)" fg:x="3957" fg:w="14"/><text x="97.9537%" y="238.50"></text></g><g><title>trace (memory_profiler.py:680) (12 samples, 0.30%)</title><rect x="98.1975%" y="228" width="0.2963%" height="15" fill="rgb(211,146,34)" fg:x="3977" fg:w="12"/><text x="98.4475%" y="238.50"></text></g><g><title>trace (memory_profiler.py:681) (9 samples, 0.22%)</title><rect x="98.4938%" y="228" width="0.2222%" height="15" fill="rgb(228,22,38)" fg:x="3989" fg:w="9"/><text x="98.7438%" y="238.50"></text></g><g><title>trace (memory_profiler.py:682) (5 samples, 0.12%)</title><rect x="98.7160%" y="228" width="0.1235%" height="15" fill="rgb(235,168,5)" fg:x="3998" fg:w="5"/><text x="98.9660%" y="238.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:797) (1,267 samples, 31.28%)</title><rect x="67.9506%" y="212" width="31.2840%" height="15" fill="rgb(221,155,16)" fg:x="2752" fg:w="1267"/><text x="68.2006%" y="222.50">trace_memory_usage (memory_profiler.py:797)</text></g><g><title>trace (memory_profiler.py:683) (16 samples, 0.40%)</title><rect x="98.8395%" y="228" width="0.3951%" height="15" fill="rgb(215,215,53)" fg:x="4003" fg:w="16"/><text x="99.0895%" y="238.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:799) (7 samples, 0.17%)</title><rect x="99.2346%" y="212" width="0.1728%" height="15" fill="rgb(223,4,10)" fg:x="4019" fg:w="7"/><text x="99.4846%" y="222.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:800) (7 samples, 0.17%)</title><rect x="99.4074%" y="212" width="0.1728%" height="15" fill="rgb(234,103,6)" fg:x="4026" fg:w="7"/><text x="99.6574%" y="222.50"></text></g><g><title>calculate_z_serial_purepython (julia1_memoryprofiler.py:19) (1,328 samples, 32.79%)</title><rect x="66.8889%" y="196" width="32.7901%" height="15" fill="rgb(227,97,0)" fg:x="2709" fg:w="1328"/><text x="67.1389%" y="206.50">calculate_z_serial_purepython (julia1_memoryprofiler...</text></g><g><title>trace (memory_profiler.py:672) (9 samples, 0.22%)</title><rect x="99.7037%" y="228" width="0.2222%" height="15" fill="rgb(234,150,53)" fg:x="4038" fg:w="9"/><text x="99.9537%" y="238.50"></text></g><g><title>_get_memory (memory_profiler.py:219) (7 samples, 0.17%)</title><rect x="99.7531%" y="244" width="0.1728%" height="15" fill="rgb(228,201,54)" fg:x="4040" fg:w="7"/><text x="100.0031%" y="254.50"></text></g><g><title>trace_memory_usage (memory_profiler.py:797) (12 samples, 0.30%)</title><rect x="99.6790%" y="212" width="0.2963%" height="15" fill="rgb(222,22,37)" fg:x="4037" fg:w="12"/><text x="99.9290%" y="222.50"></text></g><g><title>all (4,050 samples, 100%)</title><rect x="0.0000%" y="52" width="100.0000%" height="15" fill="rgb(237,53,32)" fg:x="0" fg:w="4050"/><text x="0.2500%" y="62.50"></text></g><g><title>_run_module_as_main (runpy.py:197) (4,050 samples, 100.00%)</title><rect x="0.0000%" y="68" width="100.0000%" height="15" fill="rgb(233,25,53)" fg:x="0" fg:w="4050"/><text x="0.2500%" y="78.50">_run_module_as_main (runpy.py:197)</text></g><g><title>_run_code (runpy.py:87) (4,050 samples, 100.00%)</title><rect x="0.0000%" y="84" width="100.0000%" height="15" fill="rgb(210,40,34)" fg:x="0" fg:w="4050"/><text x="0.2500%" y="94.50">_run_code (runpy.py:87)</text></g><g><title>&lt;module&gt; (memory_profiler.py:1349) (4,050 samples, 100.00%)</title><rect x="0.0000%" y="100" width="100.0000%" height="15" fill="rgb(241,220,44)" fg:x="0" fg:w="4050"/><text x="0.2500%" y="110.50">&lt;module&gt; (memory_profiler.py:1349)</text></g><g><title>exec_with_profiler (memory_profiler.py:1250) (4,050 samples, 100.00%)</title><rect x="0.0000%" y="116" width="100.0000%" height="15" fill="rgb(235,28,35)" fg:x="0" fg:w="4050"/><text x="0.2500%" y="126.50">exec_with_profiler (memory_profiler.py:1250)</text></g><g><title>&lt;module&gt; (julia1_memoryprofiler.py:66) (4,050 samples, 100.00%)</title><rect x="0.0000%" y="132" width="100.0000%" height="15" fill="rgb(210,56,17)" fg:x="0" fg:w="4050"/><text x="0.2500%" y="142.50">&lt;module&gt; (julia1_memoryprofiler.py:66)</text></g><g><title>f (memory_profiler.py:759) (4,050 samples, 100.00%)</title><rect x="0.0000%" y="148" width="100.0000%" height="15" fill="rgb(224,130,29)" fg:x="0" fg:w="4050"/><text x="0.2500%" y="158.50">f (memory_profiler.py:759)</text></g><g><title>calc_pure_python (julia1_memoryprofiler.py:54) (4,050 samples, 100.00%)</title><rect x="0.0000%" y="164" width="100.0000%" height="15" fill="rgb(235,212,8)" fg:x="0" fg:w="4050"/><text x="0.2500%" y="174.50">calc_pure_python (julia1_memoryprofiler.py:54)</text></g><g><title>f (memory_profiler.py:759) (4,050 samples, 100.00%)</title><rect x="0.0000%" y="180" width="100.0000%" height="15" fill="rgb(223,33,50)" fg:x="0" fg:w="4050"/><text x="0.2500%" y="190.50">f (memory_profiler.py:759)</text></g><g><title>calculate_z_serial_purepython (julia1_memoryprofiler.py:20) (13 samples, 0.32%)</title><rect x="99.6790%" y="196" width="0.3210%" height="15" fill="rgb(219,149,13)" fg:x="4037" fg:w="13"/><text x="99.9290%" y="206.50"></text></g></svg></svg>

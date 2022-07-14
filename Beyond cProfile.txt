@@ -1,10 +1,86 @@
-cProfile priblems:
+# Profilers ######################################
 
-#1 High overhead and distorted results
-#2 Too much information
-#3 Offline measure of performance
-#4 Measures slowness on function level
 
-solve 1 and 2 -> pyinstrument
+# to use pyinstrument ----------------------------
+pip install pyinstrument
+
+## to print in terminal (color)
 python -m pyinstrument <file>.py 
+## to save a file (bw)
 python -m pyinstrument -o test julia1_nopil.py
+
+
+
+
+# to use cProfile --------------------------------
+## print terminal
+python -m cProfile -s cumulative <file>.py
+
+## save text file
+python -m cProfile -o profile.stats <file>.py
+
+
+
+
+# to use snakeviz --------------------------------
+pip install snakeviz
+
+## to open file created by cProfile
+snakeviz -p 8111 profile.stats
+
+
+
+
+
+# to use pstats ----------------------------------
+## to use just in ipython/jupyter
+import pstats
+p = pstats.Stats("profile.stats")
+p.sort_stats("cumulative")
+p.print_stats()
+p.print_callers()
+p.print_callees()
+
+
+
+
+
+
+# to use line_profiler --------------------------
+pip install line_profiler
+
+## to print in terminal
+kernprof -l -v <file>.py
+
+### -l for line-by-line 
+### -v for verbose (print in terminal)
+
+
+
+
+# to use memory_profiler -------------------------
+pip install memory_profiler
+pip install psutil
+
+
+
+
+
+
+# to use py-spy
+pip install py-spy
+
+## use htop to get the pid
+
+## to save a svg file
+sudo env "PATH=$PATH" py-spy record -o profileps.svg --pid <#pid>
+
+## to see htop view
+sudo env "PATH=$PATH" py-spy top --pid <#pid>
+
+## to print the stack for each tread
+sudo env "PATH=$PATH" py-spy dump --pid <pid>
+
+
+
+
